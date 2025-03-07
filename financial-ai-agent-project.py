@@ -24,12 +24,20 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import matplotlib.pyplot as plt
 import seaborn as sns
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
+import os
 import joblib
 import logging
 import json
 from datetime import datetime
+
+# Import optional dependencies with error handling
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    import torch
+    transformers_available = True
+except ImportError:
+    transformers_available = False
+    print("Warning: transformers package not available. Sentiment analysis will use rule-based fallback.")
 
 class FinancialRiskAgent:
     """
@@ -82,7 +90,7 @@ class FinancialRiskAgent:
                     "news_data": "data/financial_news.csv"
                 },
                 "sentiment_analysis": {
-                    "model": "finbert-sentiment",
+                    "model": "ProsusAI/finbert",  # Changed to a valid model
                     "cache_dir": "models/"
                 },
                 "risk_thresholds": {
@@ -107,7 +115,7 @@ class FinancialRiskAgent:
             self.models["investment_return"] = GradientBoostingRegressor(**return_config["params"])
         
         # Initialize sentiment analysis model if needed
-        if self.config.get("use_sentiment", True):
+        if self.config.get("use_sentiment", True) and transformers_available:
             try:
                 model_name = self.config["sentiment_analysis"]["model"]
                 self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -115,31 +123,55 @@ class FinancialRiskAgent:
                 self.logger.info(f"Sentiment model loaded: {model_name}")
             except Exception as e:
                 self.logger.error(f"Failed to load sentiment model: {e}")
+                self.logger.info("Will use rule-based sentiment analysis as fallback")
+        elif not transformers_available:
+            self.logger.warning("Transformers package not available, using rule-based sentiment analysis")
     
     def load_and_preprocess_data(self, data_path=None):
         """Load and preprocess data from configured sources"""
         if data_path:
             # Load from specific path for testing/demo
-            df = pd.read_csv(data_path)
-            self.logger.info(f"Data loaded from {data_path}: {len(df)} records")
-            return self._preprocess_data(df)
+            try:
+                df = pd.read_csv(data_path)
+                self.logger.info(f"Data loaded from {data_path}: {len(df)} records")
+                return self._preprocess_data(df)
+            except Exception as e:
+                self.logger.error(f"Error loading data from {data_path}: {e}")
+                return self._generate_dummy_data()
         
         # In a real implementation, we would load and merge data from multiple sources
         # (customer data, market data, news data)
         self.logger.info("Loading data from configured sources")
         
         try:
+            # Check if data directory exists, create if it doesn't
+            data_dir = os.path.dirname(self.config["data_sources"]["customer_data"])
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir)
+                self.logger.info(f"Created data directory: {data_dir}")
+            
+            # Check if customer data file exists
+            customer_data_path = self.config["data_sources"]["customer_data"]
+            if not os.path.exists(customer_data_path):
+                self.logger.warning(f"Customer data file not found: {customer_data_path}")
+                self.logger.info("Will use dummy data instead")
+                return self._generate_dummy_data()
+            
             # Load customer financial data
-            customer_data = pd.read_csv(self.config["data_sources"]["customer_data"])
+            customer_data = pd.read_csv(customer_data_path)
             self.logger.info(f"Customer data loaded: {len(customer_data)} records")
             
-            # Load market indicators
-            market_data = pd.read_csv(self.config["data_sources"]["market_data"])
-            self.logger.info(f"Market data loaded: {len(market_data)} records")
-            
-            # Merge datasets (simplified for demonstration)
-            # In real implementation, we would use more sophisticated data integration
-            merged_data = customer_data.merge(market_data, on='date', how='left')
+            # Try to load market indicators if available
+            try:
+                market_data = pd.read_csv(self.config["data_sources"]["market_data"])
+                self.logger.info(f"Market data loaded: {len(market_data)} records")
+                
+                # Merge datasets (simplified for demonstration)
+                merged_data = customer_data.merge(market_data, on='date', how='left')
+            except Exception as e:
+                self.logger.warning(f"Could not load market data: {e}")
+                self.logger.info("Using customer data only")
+                merged_data = customer_data
             
             return self._preprocess_data(merged_data)
             
@@ -158,6 +190,13 @@ class FinancialRiskAgent:
         # Create feature transformers
         numeric_features = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
         categorical_features = df.select_dtypes(include=['object']).columns.tolist()
+        
+        # Remove target column and ID columns from features if they exist
+        for col in ['risk_profile', 'customer_id']:
+            if col in numeric_features:
+                numeric_features.remove(col)
+            if col in categorical_features:
+                categorical_features.remove(col)
         
         numeric_transformer = Pipeline(steps=[
             ('scaler', StandardScaler())
@@ -228,8 +267,17 @@ class FinancialRiskAgent:
         """Train the risk assessment models"""
         self.logger.info(f"Training models with target: {target_col}")
         
+        # Check if target column exists, if not create it
+        if target_col not in df.columns:
+            self.logger.info(f"Target column {target_col} not found, creating based on investment returns")
+            df[target_col] = pd.cut(
+                df['past_investment_returns'], 
+                bins=[-np.inf, 0.03, 0.10, np.inf], 
+                labels=['Conservative', 'Moderate', 'Aggressive']
+            )
+        
         # For risk profile classification
-        X = df.drop([target_col, 'customer_id'], axis=1)
+        X = df.drop([target_col, 'customer_id'] if 'customer_id' in df.columns else [target_col], axis=1)
         y = df[target_col]
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -250,23 +298,31 @@ class FinancialRiskAgent:
         
         # Extract feature importance
         if hasattr(self.models['risk_profile'], 'feature_importances_'):
-            # Get feature names after preprocessing
-            feature_names = []
-            for name, transformer, features in preprocessor.transformers_:
-                if hasattr(transformer, 'get_feature_names_out'):
-                    transformed_features = transformer.get_feature_names_out(features)
-                    feature_names.extend(transformed_features)
+            try:
+                # Get feature names after preprocessing
+                feature_names = []
+                for name, transformer, features in preprocessor.transformers_:
+                    if hasattr(transformer, 'get_feature_names_out'):
+                        transformed_features = transformer.get_feature_names_out(features)
+                        feature_names.extend(transformed_features)
+                    else:
+                        feature_names.extend(features)
+                
+                # Get feature importances and pair with names
+                importances = self.models['risk_profile'].feature_importances_
+                
+                # Handle potential mismatch in feature counts
+                if len(importances) == len(feature_names):
+                    indices = np.argsort(importances)[::-1]
+                    
+                    self.feature_importance = {
+                        'features': [feature_names[i] for i in indices],
+                        'importances': [importances[i] for i in indices]
+                    }
                 else:
-                    feature_names.extend(features)
-            
-            # Get feature importances and pair with names
-            importances = self.models['risk_profile'].feature_importances_
-            indices = np.argsort(importances)[::-1]
-            
-            self.feature_importance = {
-                'features': [feature_names[i] for i in indices],
-                'importances': [importances[i] for i in indices]
-            }
+                    self.logger.warning(f"Feature importance extraction failed: count mismatch between importances ({len(importances)}) and feature names ({len(feature_names)})")
+            except Exception as e:
+                self.logger.warning(f"Feature importance extraction failed: {e}")
         
         # Store the trained pipeline
         self.models['risk_pipeline'] = risk_model
@@ -291,11 +347,17 @@ class FinancialRiskAgent:
         if 'risk_pipeline' not in self.models:
             return self._rules_based_risk_assessment(customer_data)
         
-        # Predict risk profile using the trained model
-        risk_profile_prob = self.models['risk_pipeline'].predict_proba(customer_df)[0]
-        risk_profile_idx = np.argmax(risk_profile_prob)
-        risk_profile = self.models['risk_pipeline'].classes_[risk_profile_idx]
-        confidence = risk_profile_prob[risk_profile_idx]
+        # Ensure all required columns are present
+        try:
+            # Predict risk profile using the trained model
+            risk_profile_prob = self.models['risk_pipeline'].predict_proba(customer_df)[0]
+            risk_profile_idx = np.argmax(risk_profile_prob)
+            risk_profile = self.models['risk_pipeline'].classes_[risk_profile_idx]
+            confidence = risk_profile_prob[risk_profile_idx]
+        except Exception as e:
+            self.logger.error(f"Error predicting risk profile: {e}")
+            self.logger.info("Falling back to rules-based assessment")
+            return self._rules_based_risk_assessment(customer_data)
         
         # Create risk score (0-100)
         risk_score = self._calculate_risk_score(customer_data)
@@ -304,7 +366,7 @@ class FinancialRiskAgent:
         recommendations = self._generate_recommendations(risk_profile, risk_score, customer_data)
         
         # Include market context using sentiment analysis if available
-        market_context = self._analyze_market_context() if self.sentiment_model else None
+        market_context = self._analyze_market_context() if (self.sentiment_model or not transformers_available) else None
         
         result = {
             'customer_id': customer_data.get('customer_id', 'unknown'),
@@ -527,31 +589,69 @@ class FinancialRiskAgent:
     def analyze_sentiment(self, text):
         """Analyze sentiment of financial news text"""
         if not self.sentiment_model or not self.tokenizer:
-            self.logger.warning("Sentiment model not available")
-            return {"sentiment": "neutral", "score": 0.5}
+            return self._rule_based_sentiment(text)
         
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-        with torch.no_grad():
-            outputs = self.sentiment_model(**inputs)
+        try:
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            with torch.no_grad():
+                outputs = self.sentiment_model(**inputs)
+            
+            # Get probabilities
+            probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+            
+            # Get predicted class (negative, neutral, positive)
+            predicted_class = torch.argmax(probs, dim=1).item()
+            
+            # Map to sentiment labels
+            sentiment_labels = {0: "negative", 1: "neutral", 2: "positive"}
+            sentiment = sentiment_labels.get(predicted_class, "neutral")
+            
+            return {
+                "sentiment": sentiment,
+                "score": probs[0][predicted_class].item(),
+                "breakdown": {
+                    "negative": probs[0][0].item(),
+                    "neutral": probs[0][1].item(),
+                    "positive": probs[0][2].item()
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Sentiment analysis error: {e}")
+            return self._rule_based_sentiment(text)
+    
+    def _rule_based_sentiment(self, text):
+        """Simple rule-based sentiment analysis fallback"""
+        text = text.lower()
         
-        # Get probabilities
-        probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+        # Simple keyword-based approach
+        positive_words = ['growth', 'surge', 'increase', 'gain', 'higher', 'record', 'strong', 'positive', 'bullish', 'optimistic']
+        negative_words = ['decline', 'fall', 'drop', 'decrease', 'lower', 'weak', 'negative', 'bearish', 'pessimistic', 'concern']
         
-        # Get predicted class (negative, neutral, positive)
-        predicted_class = torch.argmax(probs, dim=1).item()
+        # Count occurrences
+        positive_count = sum(1 for word in positive_words if word in text)
+        negative_count = sum(1 for word in negative_words if word in text)
         
-        # Map to sentiment labels
-        sentiment_labels = {0: "negative", 1: "neutral", 2: "positive"}
-        sentiment = sentiment_labels.get(predicted_class, "neutral")
+        # Determine sentiment
+        if positive_count > negative_count:
+            sentiment = "positive"
+            score = 0.5 + min(0.5, (positive_count - negative_count) / 10)
+        elif negative_count > positive_count:
+            sentiment = "negative"
+            score = 0.5 - min(0.5, (negative_count - positive_count) / 10)
+        else:
+            sentiment = "neutral"
+            score = 0.5
         
+        # Create a similar structure to the model-based output
         return {
             "sentiment": sentiment,
-            "score": probs[0][predicted_class].item(),
+            "score": score,
             "breakdown": {
-                "negative": probs[0][0].item(),
-                "neutral": probs[0][1].item(),
-                "positive": probs[0][2].item()
-            }
+                "negative": negative_count / max(1, negative_count + positive_count),
+                "neutral": 0.2,  # Arbitrary neutral component
+                "positive": positive_count / max(1, negative_count + positive_count)
+            },
+            "method": "rule-based"  # Indicate this was rule-based
         }
     
     def save_models(self, directory="models"):
@@ -583,218 +683,17 @@ class FinancialRiskAgent:
             return None
         
         plt.figure(figsize=(10, 6))
-        features = self.feature_importance['features'][:top_n]
-        importances = self.feature_importance['importances'][:top_n]
+        
+        # Limit to top_n features (or all if fewer than top_n)
+        n_features = min(top_n, len(self.feature_importance['features']))
+        features = self.feature_importance['features'][:n_features]
+        importances = self.feature_importance['importances'][:n_features]
         
         sns.barplot(x=importances, y=features)
-        plt.title(f"Top {top_n} Features for Risk Profile Prediction")
+        plt.title(f"Top {n_features} Features for Risk Profile Prediction")
         plt.xlabel("Importance")
         plt.tight_layout()
         return plt
-
-# Example usage of the agent
-def demo_financial_risk_agent():
-    """Demonstrate the financial risk agent functionality"""
-    # Initialize the agent
-    agent = FinancialRiskAgent()
-    
-    # Load and preprocess data
-    df, preprocessor = agent.load_and_preprocess_data()
-    
-    # Add a risk profile column for training (in real implementation, this would come from labeled data)
-    df['risk_profile'] = pd.cut(
-        df['past_investment_returns'], 
-        bins=[-np.inf, 0.03, 0.10, np.inf], 
-        labels=['Conservative', 'Moderate', 'Aggressive']
-    )
-    
-    # Train the models
-    agent.train_models(df, preprocessor, target_col='risk_profile')
-    
-    # Example customer data
-    customer = {
-        'customer_id': 12345,
-        'age': 45,
-        'income': 85000,
-        'savings': 75000,
-        'debt': 120000,
-        'credit_score': 710,
-        'education_level': 'Bachelor',
-        'employment_status': 'Employed',
-        'has_mortgage': 1,
-        'has_dependents': 1,
-        'market_sentiment': 0.2,
-        'past_investment_returns': 0.06
-    }
-    
-    # Analyze risk for the customer
-    risk_assessment = agent.analyze_customer_risk(customer)
-    
-    # Print the assessment
-    print(json.dumps(risk_assessment, indent=2))
-    
-    # Plot feature importance
-    agent.plot_feature_importance()
-    plt.savefig('feature_importance.png')
-    
-    return risk_assessment
-
-# Example implementation of a simple UI for the risk assessment agent
-def create_demonstration_ui():
-    """
-    Create a simple demonstration UI for the financial risk agent
-    This would typically be implemented with a web framework like Flask or Streamlit
-    """
-    import tkinter as tk
-    from tkinter import ttk
-    import json
-    
-    # Initialize the agent
-    agent = FinancialRiskAgent()
-    
-    # Load and preprocess data
-    df, preprocessor = agent.load_and_preprocess_data()
-    
-    # Add a risk profile column for training
-    df['risk_profile'] = pd.cut(
-        df['past_investment_returns'], 
-        bins=[-np.inf, 0.03, 0.10, np.inf], 
-        labels=['Conservative', 'Moderate', 'Aggressive']
-    )
-    
-    # Train the models
-    agent.train_models(df, preprocessor, target_col='risk_profile')
-    
-    # Create the UI
-    root = tk.Tk()
-    root.title("FinAssist: Financial Risk Assessment Agent")
-    root.geometry("800x600")
-    
-    # Customer data entry frame
-    input_frame = ttk.LabelFrame(root, text="Customer Financial Information")
-    input_frame.pack(padx=10, pady=10, fill="x")
-    
-    # Customer data fields
-    fields = [
-        ("Customer ID", "customer_id", 12345),
-        ("Age", "age", 45),
-        ("Annual Income ($)", "income", 85000),
-        ("Savings ($)", "savings", 75000),
-        ("Total Debt ($)", "debt", 120000),
-        ("Credit Score", "credit_score", 710)
-    ]
-    
-    entries = {}
-    for i, (label, field, default) in enumerate(fields):
-        ttk.Label(input_frame, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=5)
-        entry = ttk.Entry(input_frame)
-        entry.insert(0, str(default))
-        entry.grid(row=i, column=1, sticky="ew", padx=5, pady=5)
-        entries[field] = entry
-    
-    # Drop-down fields
-    dropdown_fields = [
-        ("Education Level", "education_level", ["High School", "Bachelor", "Master", "PhD"], "Bachelor"),
-        ("Employment Status", "employment_status", ["Employed", "Self-employed", "Unemployed", "Retired"], "Employed"),
-        ("Risk Tolerance", "risk_tolerance", ["Low", "Medium", "High"], "Medium")
-    ]
-    
-    dropdown_vars = {}
-    for i, (label, field, options, default) in enumerate(dropdown_fields):
-        ttk.Label(input_frame, text=label).grid(row=i+len(fields), column=0, sticky="w", padx=5, pady=5)
-        var = tk.StringVar(value=default)
-        dropdown = ttk.Combobox(input_frame, textvariable=var, values=options)
-        dropdown.grid(row=i+len(fields), column=1, sticky="ew", padx=5, pady=5)
-        dropdown_vars[field] = var
-    
-    # Checkbox fields
-    checkbox_fields = [
-        ("Has Mortgage", "has_mortgage", 1),
-        ("Has Dependents", "has_dependents", 1),
-        ("Has Insurance", "has_insurance", 0)
-    ]
-    
-    checkbox_vars = {}
-    for i, (label, field, default) in enumerate(checkbox_fields):
-        var = tk.IntVar(value=default)
-        checkbox = ttk.Checkbutton(input_frame, text=label, variable=var)
-        checkbox.grid(row=i+len(fields)+len(dropdown_fields), column=0, columnspan=2, sticky="w", padx=5, pady=5)
-        checkbox_vars[field] = var
-    
-    # Results display
-    result_frame = ttk.LabelFrame(root, text="Risk Assessment Results")
-    result_frame.pack(padx=10, pady=10, fill="both", expand=True)
-    
-    result_text = tk.Text(result_frame, wrap="word", height=15)
-    result_text.pack(padx=5, pady=5, fill="both", expand=True)
-    
-    # Function to analyze customer risk based on input data
-    def analyze_risk():
-        # Collect data from input fields
-        customer_data = {}
-        
-        # Get values from text entries
-        for field, entry in entries.items():
-            try:
-                # Convert numeric fields to appropriate types
-                if field in ['customer_id', 'age', 'credit_score']:
-                    customer_data[field] = int(entry.get())
-                elif field in ['income', 'savings', 'debt']:
-                    customer_data[field] = float(entry.get())
-                else:
-                    customer_data[field] = entry.get()
-            except ValueError:
-                result_text.delete(1.0, tk.END)
-                result_text.insert(tk.END, f"Error: Invalid value for {field}")
-                return
-        
-        # Get values from dropdowns
-        for field, var in dropdown_vars.items():
-            customer_data[field] = var.get()
-        
-        # Get values from checkboxes
-        for field, var in checkbox_vars.items():
-            customer_data[field] = var.get()
-        
-        # Add a default market sentiment value
-        customer_data['market_sentiment'] = 0.1
-        customer_data['past_investment_returns'] = 0.06
-        
-        # Perform risk assessment
-        result = agent.analyze_customer_risk(customer_data)
-        
-        # Display results
-        result_text.delete(1.0, tk.END)
-        
-        # Format and display the results
-        result_text.insert(tk.END, f"Customer ID: {result['customer_id']}\n")
-        result_text.insert(tk.END, f"Analysis Date: {result['analysis_timestamp'][:10]}\n\n")
-        
-        result_text.insert(tk.END, f"RISK PROFILE: {result['risk_profile'].upper()}\n")
-        result_text.insert(tk.END, f"Risk Score: {result['risk_score']:.1f}/100\n")
-        result_text.insert(tk.END, f"Confidence: {result['confidence']:.2f}\n\n")
-        
-        result_text.insert(tk.END, "KEY FACTORS:\n")
-        for factor in result['key_factors']:
-            impact_symbol = "+" if factor['impact'] == "Positive" else "-"
-            result_text.insert(tk.END, f"{impact_symbol} {factor['factor']}: {factor['description']}\n")
-        
-        result_text.insert(tk.END, "\nRECOMMENDATIONS:\n")
-        for rec in result['recommendations']:
-            result_text.insert(tk.END, f"• {rec['category']}: {rec['recommendation']}\n")
-            result_text.insert(tk.END, f"  Rationale: {rec['rationale']}\n\n")
-        
-        if 'market_context' in result and result['market_context']:
-            result_text.insert(tk.END, "\nMARKET CONTEXT:\n")
-            for key, value in result['market_context'].items():
-                result_text.insert(tk.END, f"• {key.replace('_', ' ').title()}: {value}\n")
-    
-    # Analyze button
-    analyze_button = ttk.Button(input_frame, text="Analyze Risk Profile", command=analyze_risk)
-    analyze_button.grid(row=len(fields)+len(dropdown_fields)+len(checkbox_fields), column=0, columnspan=2, pady=10)
-    
-    # Run the demo application
-    root.mainloop()
 
 class FinancialNewsMonitor:
     """
@@ -816,8 +715,12 @@ class FinancialNewsMonitor:
         
     def initialize_sentiment_model(self):
         """Initialize the sentiment analysis model"""
+        if not transformers_available:
+            logging.info("Transformers package not available, using rule-based sentiment analysis")
+            return
+            
         try:
-            model_name = "finbert-sentiment"  # Or another appropriate financial sentiment model
+            model_name = "ProsusAI/finbert"  # Using a valid financial sentiment model
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_name)
             logging.info(f"Sentiment model loaded: {model_name}")
@@ -1149,6 +1052,215 @@ class RegulatoryComplianceChecker:
             "compliant": len(issues) == 0,
             "issues": issues
         }
+
+# Example usage of the agent
+def demo_financial_risk_agent():
+    """Demonstrate the financial risk agent functionality"""
+    # Initialize the agent
+    agent = FinancialRiskAgent()
+    
+    # Load and preprocess data
+    df, preprocessor = agent.load_and_preprocess_data()
+    
+    # Add a risk profile column for training (in real implementation, this would come from labeled data)
+    df['risk_profile'] = pd.cut(
+        df['past_investment_returns'], 
+        bins=[-np.inf, 0.03, 0.10, np.inf], 
+        labels=['Conservative', 'Moderate', 'Aggressive']
+    )
+    
+    # Train the models
+    agent.train_models(df, preprocessor, target_col='risk_profile')
+    
+    # Example customer data
+    customer = {
+        'customer_id': 12345,
+        'age': 45,
+        'income': 85000,
+        'savings': 75000,
+        'debt': 120000,
+        'credit_score': 710,
+        'education_level': 'Bachelor',
+        'employment_status': 'Employed',
+        'has_mortgage': 1,
+        'has_dependents': 1,
+        'market_sentiment': 0.2,
+        'past_investment_returns': 0.06,
+        'risk_tolerance': 'Medium'  # Added the missing field
+    }
+    
+    # Analyze risk for the customer
+    risk_assessment = agent.analyze_customer_risk(customer)
+    
+    # Print the assessment
+    print(json.dumps(risk_assessment, indent=2))
+    
+    # Plot feature importance
+    try:
+        plt.figure = agent.plot_feature_importance()
+        plt.savefig('feature_importance.png')
+        print("Feature importance plot saved to 'feature_importance.png'")
+    except Exception as e:
+        print(f"Could not create feature importance plot: {e}")
+    
+    return risk_assessment
+
+# Example implementation of a simple UI for the risk assessment agent
+def create_demonstration_ui():
+    """
+    Create a simple demonstration UI for the financial risk agent
+    This would typically be implemented with a web framework like Flask or Streamlit
+    """
+    import tkinter as tk
+    from tkinter import ttk
+    import json
+    
+    # Initialize the agent
+    agent = FinancialRiskAgent()
+    
+    # Load and preprocess data
+    df, preprocessor = agent.load_and_preprocess_data()
+    
+    # Add a risk profile column for training
+    df['risk_profile'] = pd.cut(
+        df['past_investment_returns'], 
+        bins=[-np.inf, 0.03, 0.10, np.inf], 
+        labels=['Conservative', 'Moderate', 'Aggressive']
+    )
+    
+    # Train the models
+    agent.train_models(df, preprocessor, target_col='risk_profile')
+    
+    # Create the UI
+    root = tk.Tk()
+    root.title("FinAssist: Financial Risk Assessment Agent")
+    root.geometry("800x600")
+    
+    # Customer data entry frame
+    input_frame = ttk.LabelFrame(root, text="Customer Financial Information")
+    input_frame.pack(padx=10, pady=10, fill="x")
+    
+    # Customer data fields
+    fields = [
+        ("Customer ID", "customer_id", 12345),
+        ("Age", "age", 45),
+        ("Annual Income ($)", "income", 85000),
+        ("Savings ($)", "savings", 75000),
+        ("Total Debt ($)", "debt", 120000),
+        ("Credit Score", "credit_score", 710)
+    ]
+    
+    entries = {}
+    for i, (label, field, default) in enumerate(fields):
+        ttk.Label(input_frame, text=label).grid(row=i, column=0, sticky="w", padx=5, pady=5)
+        entry = ttk.Entry(input_frame)
+        entry.insert(0, str(default))
+        entry.grid(row=i, column=1, sticky="ew", padx=5, pady=5)
+        entries[field] = entry
+    
+    # Drop-down fields
+    dropdown_fields = [
+        ("Education Level", "education_level", ["High School", "Bachelor", "Master", "PhD"], "Bachelor"),
+        ("Employment Status", "employment_status", ["Employed", "Self-employed", "Unemployed", "Retired"], "Employed"),
+        ("Risk Tolerance", "risk_tolerance", ["Low", "Medium", "High"], "Medium")
+    ]
+    
+    dropdown_vars = {}
+    for i, (label, field, options, default) in enumerate(dropdown_fields):
+        ttk.Label(input_frame, text=label).grid(row=i+len(fields), column=0, sticky="w", padx=5, pady=5)
+        var = tk.StringVar(value=default)
+        dropdown = ttk.Combobox(input_frame, textvariable=var, values=options)
+        dropdown.grid(row=i+len(fields), column=1, sticky="ew", padx=5, pady=5)
+        dropdown_vars[field] = var
+    
+    # Checkbox fields
+    checkbox_fields = [
+        ("Has Mortgage", "has_mortgage", 1),
+        ("Has Dependents", "has_dependents", 1),
+        ("Has Insurance", "has_insurance", 0)
+    ]
+    
+    checkbox_vars = {}
+    for i, (label, field, default) in enumerate(checkbox_fields):
+        var = tk.IntVar(value=default)
+        checkbox = ttk.Checkbutton(input_frame, text=label, variable=var)
+        checkbox.grid(row=i+len(fields)+len(dropdown_fields), column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        checkbox_vars[field] = var
+    
+    # Results display
+    result_frame = ttk.LabelFrame(root, text="Risk Assessment Results")
+    result_frame.pack(padx=10, pady=10, fill="both", expand=True)
+    
+    result_text = tk.Text(result_frame, wrap="word", height=15)
+    result_text.pack(padx=5, pady=5, fill="both", expand=True)
+    
+    # Function to analyze customer risk based on input data
+    def analyze_risk():
+        # Collect data from input fields
+        customer_data = {}
+        
+        # Get values from text entries
+        for field, entry in entries.items():
+            try:
+                # Convert numeric fields to appropriate types
+                if field in ['customer_id', 'age', 'credit_score']:
+                    customer_data[field] = int(entry.get())
+                elif field in ['income', 'savings', 'debt']:
+                    customer_data[field] = float(entry.get())
+                else:
+                    customer_data[field] = entry.get()
+            except ValueError:
+                result_text.delete(1.0, tk.END)
+                result_text.insert(tk.END, f"Error: Invalid value for {field}")
+                return
+        
+        # Get values from dropdowns
+        for field, var in dropdown_vars.items():
+            customer_data[field] = var.get()
+        
+        # Get values from checkboxes
+        for field, var in checkbox_vars.items():
+            customer_data[field] = var.get()
+        
+        # Add a default market sentiment value
+        customer_data['market_sentiment'] = 0.1
+        customer_data['past_investment_returns'] = 0.06
+        
+        # Perform risk assessment
+        result = agent.analyze_customer_risk(customer_data)
+        
+        # Display results
+        result_text.delete(1.0, tk.END)
+        
+        # Format and display the results
+        result_text.insert(tk.END, f"Customer ID: {result['customer_id']}\n")
+        result_text.insert(tk.END, f"Analysis Date: {result['analysis_timestamp'][:10]}\n\n")
+        
+        result_text.insert(tk.END, f"RISK PROFILE: {result['risk_profile'].upper()}\n")
+        result_text.insert(tk.END, f"Risk Score: {result['risk_score']:.1f}/100\n")
+        result_text.insert(tk.END, f"Confidence: {result['confidence']:.2f}\n\n")
+        
+        result_text.insert(tk.END, "KEY FACTORS:\n")
+        for factor in result['key_factors']:
+            impact_symbol = "+" if factor['impact'] == "Positive" else "-"
+            result_text.insert(tk.END, f"{impact_symbol} {factor['factor']}: {factor['description']}\n")
+        
+        result_text.insert(tk.END, "\nRECOMMENDATIONS:\n")
+        for rec in result['recommendations']:
+            result_text.insert(tk.END, f"• {rec['category']}: {rec['recommendation']}\n")
+            result_text.insert(tk.END, f"  Rationale: {rec['rationale']}\n\n")
+        
+        if 'market_context' in result and result['market_context']:
+            result_text.insert(tk.END, "\nMARKET CONTEXT:\n")
+            for key, value in result['market_context'].items():
+                result_text.insert(tk.END, f"• {key.replace('_', ' ').title()}: {value}\n")
+    
+    # Analyze button
+    analyze_button = ttk.Button(input_frame, text="Analyze Risk Profile", command=analyze_risk)
+    analyze_button.grid(row=len(fields)+len(dropdown_fields)+len(checkbox_fields), column=0, columnspan=2, pady=10)
+    
+    # Run the demo application
+    root.mainloop()
 
 if __name__ == "__main__":
     # Example usage
