@@ -1,7 +1,5 @@
 # FinAssist: Financial AI Agent for Risk Assessment
 
-![FinAssist Logo](https://placeholder-image.com/finassist-logo.png)
-
 ## Project Overview
 
 FinAssist is an AI-powered financial agent designed to help financial advisors provide personalized risk assessments and recommendations to customers. This system demonstrates a sophisticated approach to applying machine learning to solve complex financial problems while prioritizing customer experience and regulatory compliance.
@@ -10,7 +8,7 @@ FinAssist is an AI-powered financial agent designed to help financial advisors p
 
 The overall architecture of FinAssist is designed to process multiple data sources, perform advanced analytics, and deliver personalized recommendations:
 
-![FinAssist Architecture](https://raw.githubusercontent.com/miladnasiri/Financial-AI-Agents-/main/architecture-diagram.png)
+![FinAssist Architecture](FinAssist%20System%20Architecture%20Flow%20Chart.png)
 
 ## Key Features
 
@@ -41,17 +39,25 @@ The overall architecture of FinAssist is designed to process multiple data sourc
 
 ## Data Visualizations
 
-### Feature Importance in Risk Assessment
-![Feature Importance](https://raw.githubusercontent.com/miladnasiri/Financial-AI-Agents-/main/feature-importance.png)
+### FinAssist Visualization Dashboard
+Check out our complete visualization dashboard:
+
+https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/FinAssist%20Data%20Visualizations.webm
 
 ### Risk Profile Distribution
-![Risk Profiles](https://raw.githubusercontent.com/miladnasiri/Financial-AI-Agents-/main/risk-profiles.png)
+See how customer risk profiles are distributed:
+
+https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Risk%20Profile%20Distribution.webm
 
 ### Average Risk Score by Age Group
-![Risk Score by Age](https://raw.githubusercontent.com/miladnasiri/Financial-AI-Agents-/main/risk-by-age.png)
+Analyze how risk tolerance changes with age:
+
+https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Average%20Risk%20Score%20by%20Age%20Group.webm
 
 ### Model Performance Metrics
-![Model Performance](https://raw.githubusercontent.com/miladnasiri/Financial-AI-Agents-/main/model-performance.png)
+Review our model's performance metrics:
+
+https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Model%20Performance%20Metrics.webm
 
 ## Technical Implementation
 
@@ -67,6 +73,7 @@ The overall architecture of FinAssist is designed to process multiple data sourc
 - pandas, numpy, scikit-learn
 - PyTorch (for sentiment analysis)
 - matplotlib, seaborn (for visualization)
+- React (for the user interface)
 
 ## Usage
 
@@ -103,6 +110,13 @@ risk_assessment = agent.analyze_customer_risk(customer)
 print(json.dumps(risk_assessment, indent=2))
 ```
 
+## Project Components
+
+1. **financial-ai-agent-project.py**: Main Python implementation of the FinAssist agent
+2. **finassist-plots.tsx**: React component for data visualizations
+3. **cover-letter.md**: Sample cover letter for job applications
+4. **Visualization Videos**: Demonstrations of the data visualization capabilities
+
 ## Future Development
 
 1. **Real-time Market Integration**
@@ -118,7 +132,7 @@ print(json.dumps(risk_assessment, indent=2))
 
 ## License
 
-This project is available under the MIT License - see the LICENSE file for details.
+This project is available under the MIT License.
 
 ## Author
 
