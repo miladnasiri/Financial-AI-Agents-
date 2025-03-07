@@ -40,24 +40,16 @@ The overall architecture of FinAssist is designed to process multiple data sourc
 ## Data Visualizations
 
 ### FinAssist Visualization Dashboard
-Check out our complete visualization dashboard:
-
-https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/FinAssist%20Data%20Visualizations.webm
+![FinAssist Dashboard](finassist-dashboard.gif)
 
 ### Risk Profile Distribution
-See how customer risk profiles are distributed:
-
-https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Risk%20Profile%20Distribution.webm
+![Risk Profiles](risk-profile.gif)
 
 ### Average Risk Score by Age Group
-Analyze how risk tolerance changes with age:
-
-https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Average%20Risk%20Score%20by%20Age%20Group.webm
+![Risk by Age](risk-by-age.gif)
 
 ### Model Performance Metrics
-Review our model's performance metrics:
-
-https://github.com/miladnasiri/Financial-AI-Agents-/raw/main/Model%20Performance%20Metrics.webm
+![Model Performance](model-performance.gif)
 
 ## Technical Implementation
 
@@ -115,7 +107,6 @@ print(json.dumps(risk_assessment, indent=2))
 1. **financial-ai-agent-project.py**: Main Python implementation of the FinAssist agent
 2. **finassist-plots.tsx**: React component for data visualizations
 3. **cover-letter.md**: Sample cover letter for job applications
-4. **Visualization Videos**: Demonstrations of the data visualization capabilities
 
 ## Future Development
 
